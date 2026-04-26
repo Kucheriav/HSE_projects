@@ -1,85 +1,82 @@
-from ai import OpenRouterClient
-from tools_functions import *
-import json
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
+from langchain_openrouter import ChatOpenRouter
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 
-user_chats: dict[int, list[dict]] = {}
+from tools_functions import wiki_search, generate_picture, get_content_info
+
+SYSTEM_PROMPT = """Ты бот для VK. Получаешь запросы пользователей, определяешь нужно ли использовать инструменты.
+Если нужен поиск по Wikipedia — используй wiki_search.
+Если нужно сгенерировать картинку — используй generate_picture.
+Внимательно читай результаты инструментов и формируй ответ пользователю."""
+
+MAX_HISTORY_MESSAGES = 10
+
+MODEL_NAME = "qwen/qwen3.5-flash-02-23"
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "qwen/qwen3.5-flash-02-23"
-SYSTEM_PROMPT = "Bot for VK. Receives user requests, determines which tool to use, calls it and outputs the result."
 
-
-TOOL_MAPPING = {
-    "wiki_search": wiki_search,
-    "generate_picture": generate_picture,
-    "get_content_info": get_content_info
-}
-
-#TODO
-tools_description = [{}]
-
-ai_model = OpenRouterClient(
+ai = ChatOpenRouter(
+    model=MODEL_NAME,
+    temperature=0.7,
+    max_tokens=500,
     api_key=AI_API_KEY,
-    model=MODEL,
-    system_prompt=SYSTEM_PROMPT,
-    tools=tools_description,
+    app_url="hse.ru",
+    app_title="Test AI Bot",
 )
+
+AVAILABLE_TOOLS = [wiki_search, generate_picture, get_content_info]
+ai_with_tools = ai.bind_tools(AVAILABLE_TOOLS)
+
+user_chats: dict[int, list] = {}
+
+
 def handle(user_message: str, user_id: int):
-
-    # Получаем историю или инициализируем первой системной ролью
     history = user_chats.get(user_id)
+
     if not history:
-        history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    # Добавляем сообщение пользователя
-    history.append({"role": "user", "content": user_message})
+        history = [SystemMessage(content=SYSTEM_PROMPT)]
 
-    # LLM выбирает инструмент
-    tool_calls = ai_model.choose_tool(history)
+    history.append(HumanMessage(content=user_message))
 
-    if not tool_calls:
-        # Просто обычный ответ модели
-        bot_reply = ai_model.chat(history)
-        history.append(bot_reply)
-        user_chats[user_id] = history[-8:]  # Обрезаем историю при необходимости
-        return bot_reply['content'], None
+    history = history[-MAX_HISTORY_MESSAGES:]
 
-    # Если инструмент выбран, вызываем его
-    results = []
-    for tool_call in tool_calls:
-        tool_name = tool_call.function.name
-        tool_args = json.loads(tool_call.function.arguments)
-        func = TOOL_MAPPING.get(tool_name)
-        if not func:
-            answer = f"Неизвестная функция: {tool_name}"
-            results.append(answer)
-            continue
-        try:
-            tool_response = func(**tool_args)
-        except Exception as e:
-            tool_response = f"Ошибка выполнения: {str(e)}"
-        # Добавляем ответ инструмента в историю
-        history.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id if hasattr(tool_call, "id") else None,
-            "name": tool_name,
-            "content": json.dumps(tool_response)
-        })
-        results.append(tool_response)
+    response = ai_with_tools.invoke(history)
 
-    # Получим итоговый ответ от LLM с дополненной историей
-    bot_reply = ai_model.chat(history)
-    history.append(bot_reply)
-    user_chats[user_id] = history[-8:]  # max_message_history или сколько вам нужно
+    if hasattr(response, "tool_calls") and response.tool_calls:
+        for tool_call in response.tool_calls:
+            tool_name = tool_call.name
+            tool_args = tool_call.arguments
+            tool_func = next((t for t in AVAILABLE_TOOLS if t.name == tool_name), None)
 
-    # Возвращаем первый результат +, optionally, вложение для VK
-    if len(results) > 1:
-        reply_text = "\n".join(str(res) for res in results)
+            if not tool_func:
+                tool_result = f"Неизвестная функция: {tool_name}"
+            else:
+                try:
+                    tool_result = tool_func.invoke(tool_args)
+                except Exception as e:
+                    tool_result = f"Ошибка выполнения: {str(e)}"
+
+            history.append(AIMessage(content=response.content, tool_calls=[tool_call]))
+            history.append(tool_result)
+
+        final_response = ai.invoke(history)
+        history.append(final_response)
     else:
-        reply_text = results[0]
+        final_response = response
+        history.append(final_response)
 
-    # Предполагаем, что для VK вложение — это url-картинка/идентификатор, если есть
+    user_chats[user_id] = history
+
+    text = final_response.content if hasattr(final_response, "content") else str(final_response)
     attachment = None
-    if isinstance(results[0], dict) and "picture_url" in results[0]:
-        attachment = results[0]["picture_url"]
 
-    return reply_text, attachment
+    if hasattr(response, "tool_calls"):
+        for tc in response.tool_calls:
+            if tc.name == "generate_picture":
+                if hasattr(tc, "artifact") and tc.artifact:
+                    attachment = tc.artifact.get("url")
+
+    return text, attachment
