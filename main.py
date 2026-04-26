@@ -39,16 +39,17 @@ def run_bot() -> None:
     vk_session = VkApi(token=group_token)
     vk = vk_session.get_api()
     longpoll = VkBotLongPoll(vk_session, group_id, 25)
-
     for event in longpoll.listen():
         if event.type != VkBotEventType.MESSAGE_NEW:
             continue
-        # print(event.message['text'])
-        res = handle(event.message['text'], event.message.peer_id)
-        if res is None:
-            send_message(vk, event.message.peer_id, "Произошла ошибка")
-        else:
-            send_message(vk, event.message.peer_id, res[0], res[1])
+        try:
+            res = handle(event.message['text'], event.message.peer_id)
+            if res is None:
+                send_message(vk, event.message.peer_id, "Произошла ошибка")
+            else:
+                send_message(vk, event.message.peer_id, res[0], res[1])
+        except Exception as e:
+            send_message(vk, event.message.peer_id, f"Ошибка: {e}")
 
 
 run_bot()

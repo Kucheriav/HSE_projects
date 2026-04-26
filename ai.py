@@ -16,6 +16,7 @@ class OpenRouterClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_message_history = max_message_history
+        self.tools = tools
 
         self._client = OpenAI(
             base_url=self.BASE_URL,
@@ -26,39 +27,28 @@ class OpenRouterClient:
             "HTTP-Header": self.SITE_URL,
             "X-Title": self.APP_NAME
         }
-        self.messages:list[dict] = [{"role": "system", "content": self.system_prompt}]
-        self.tools = tools
 
-    def chat(self, user_message: str) -> list[dict]:
-
-
-        self.messages.append({"role": "user", "content": user_message})
-
+    def chat(self, history: list[dict]) -> dict:
         completion = self._client.chat.completions.create(
             model=self.model,
-            messages=self.messages,
+            messages=history,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             tools=self.tools,
             extra_headers=self._extra_headers,
         )
+        return completion.choices[0].message
 
-        self.messages.append(completion.choices[0].message)
-
-        if len(self.messages) > self.max_message_history:
-            messages = self.messages[-self.max_message_history:]
-
-        return messages
-
-    def choose_tool(self, user_message: str):
-        self.messages.append({"role": "user", "content": user_message})
-
-        tools = self._client.chat.completions.create(
+    def choose_tool(self, history: list[dict]) -> list:
+        completion = self._client.chat.completions.create(
             model=self.model,
-            messages=self.messages,
+            messages=history,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             tools=self.tools,
             extra_headers=self._extra_headers,
-        ).message.tool_calls
-        return tools
+        )
+        # Предположим, что tool_calls — это list, как у OpenAI
+        if hasattr(completion.choices[0].message, "tool_calls"):
+            return completion.choices[0].message.tool_calls
+        return []
